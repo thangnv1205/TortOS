@@ -113,7 +113,7 @@ jobs:
         run: |
           make -f mk/cross.mk DEVICE=brick CC=gcc SYSROOT=/ \
                VERSION="${{ steps.ver.outputs.version }}" \
-               build/tortos.elf build/muse build/btplayer
+               creds build/tortos.elf build/muse build/btplayer
 
       - name: Check ABI against the device
         run: |

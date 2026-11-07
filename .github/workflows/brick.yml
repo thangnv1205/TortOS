@@ -97,7 +97,7 @@ jobs:
         run: |
           make -j"$(nproc)"
           make stub
-          SDL_AUDIODRIVER=dummy SDL_VIDEODRIVER=dummy make check
+          SDL_AUDIODRIVER=dummy SDL_VIDEODRIVER=dummy SDL_RENDER_DRIVER=software make check
 
       - name: Build Diatom (PORT=brick)
         working-directory: diatom

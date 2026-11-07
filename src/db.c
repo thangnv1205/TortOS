@@ -36,6 +36,7 @@ static const db_default device_defaults[] = {
 static const db_default library_defaults[] = {
 	{ "timezone",       "America/New_York" },
 	{ "startup_system", "NES" },
+	{ "muse.mode",      "in order" }, /* in order | repeat all | repeat one | shuffle */
 
 	/* Turbo, per system tag. `x:a~3,y:b~3` says X is a turbo A and Y a turbo
 	 * B, three frames pressed and three released - about ten presses a second

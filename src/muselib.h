@@ -63,9 +63,31 @@ void ml_free(ml_lib *lib);
 /* Whether a file name is audio Muse plays, by extension. */
 bool ml_is_audio(const char *name);
 
+/* Whether a file name is a playlist Muse can read (.m3u / .m3u8). */
+bool ml_is_playlist(const char *name);
+
 /* The name a track is shown by: no extension, and no leading track number -
  * "03 High And Dry.mp3" is "High And Dry". */
 void ml_track_name(const char *file, char *out, int n);
+
+/* One line of an .lrc file: when it starts (seconds, fractional), and the
+ * words. Up to ML_LRC_MAX lines are kept. */
+#define ML_LRC_MAX 256
+typedef struct { double at; char line[160]; } ml_lrc_line;
+
+/* Read an .lrc file beside `audio_path` (same stem, .lrc extension). Lines
+ * are [mm:ss.xx]text or [mm:ss,xx]text; anything else is ignored. Returns the
+ * number of lines, or -1 on error. `out` must hold ML_LRC_MAX entries. */
+int ml_lrc_read(const char *audio_path, ml_lrc_line *out);
+
+/* Find the line showing now, and the next one, at playback second `at`.
+ * Returns the index of the current line (-1 if none yet), and sets *next to
+ * the index of the following line (-1 if none). */
+int ml_lrc_at(const ml_lrc_line *lrc, int n, double at, int *next);
+
+/* UTF-8 NFD → NFC cho tên file (macOS lưu NFD). Trả độ dài của out, không
+ * tính NUL. Dấu tiếng Việt được ghép lại. */
+size_t ml_utf8_nfd_to_nfc(const char *in, char *out, size_t outn);
 
 /* Names as the shelf shows them, the card untouched. A name with no spaces
  * whose words are joined by dots or underscores, the way some downloads come
@@ -113,7 +135,7 @@ bool ml_folder_image(const char *root, const ml_lib *l, int al, char *out, size_
  * Nothing here orders by date or by listening. Muse keeps no record of what
  * was played, and the card knows no release years - the tags that carry them
  * are read by the daemon, not the scan. */
-typedef enum { ML_BY_ARTIST, ML_BY_ALBUM, ML_ORDERS } ml_order;
+typedef enum { ML_BY_ARTIST, ML_BY_ALBUM, ML_BY_FOLDER, ML_ORDERS } ml_order;
 
 /* What the setting stores, and what the menu row shows - which for books is
  * Author and Title, the same two orders under the names a book goes by. */

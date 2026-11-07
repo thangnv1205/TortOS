@@ -14,6 +14,7 @@
 
 #include "hare.h"
 #include "muselib.h"
+#include "net.h"
 #include "xfer.h"
 
 #define PIN_LEN        4
@@ -1346,6 +1347,93 @@ static void on_request(httpd_req *r, bool done, void *ctx)
 			return;
 		}
 		note("made %s", base_of(abs));
+		httpd_reply(r, 200, "text/plain", "ok", 2, NULL);
+		return;
+	}
+
+	if (!strcmp(path, "/api/ota/check") && !strcmp(m, "GET")) {
+		if (!done) { httpd_want_body(r, HTTPD_BODY_NONE, NULL); return; }
+		char body[2048];
+		/* Ask GitHub for the latest TortOS release. The device carries its
+		 * own CA bundle in res/ssl/cacert.pem, so HTTPS verifies. */
+		long n = net_get_buf("https://api.github.com/repos/ericreinsmidt/TortOS/releases/latest",
+				     NULL, 0, body, sizeof body, 15);
+		if (n <= 0) {
+			httpd_reply_status(r, 502, "could not reach GitHub");
+			return;
+		}
+		body[n] = '\0';
+		/* Pull tag_name out of the JSON. Minimal parsing: find the field,
+		 * copy the quoted string, unquote it. Enough for a version check. */
+		char *tag = strstr(body, "\"tag_name\"");
+		char version[64] = { 0 };
+		if (tag) {
+			char *q = strchr(tag, '"');
+			if (q) { q = strchr(q + 1, '"'); }
+			if (q) {
+				char *e = strchr(q + 1, '"');
+				if (e && (size_t)(e - q - 1) < sizeof version) {
+					memcpy(version, q + 1, e - q - 1);
+					version[e - q - 1] = '\0';
+				}
+			}
+		}
+		char out[512];
+		int len = snprintf(out, sizeof out,
+				   "{\"version\":\"%s\",\"url\":\"https://github.com/ericreinsmidt/TortOS/releases/latest\"}",
+				   version);
+		if (len < 0 || (size_t)len >= sizeof out) len = (int)sizeof out - 1;
+		httpd_reply(r, 200, "application/json", out, len, NULL);
+		return;
+	}
+
+	if (!strcmp(path, "/api/ota/image") && !strcmp(m, "PUT")) {
+		char abs[XFER_PATH_MAX];
+		snprintf(abs, sizeof abs, "/tmp/tortos.img");
+		if (!done) {
+			if (!room_for(abs, httpd_content_len(r))) {
+				httpd_want_body(r, HTTPD_BODY_NONE, NULL);
+				httpd_reply_status(r, 507, "not enough room on the card");
+				return;
+			}
+			httpd_want_body(r, HTTPD_BODY_FILE, "/tmp/tortos.img.part");
+			g_uploads++;
+			note("receiving firmware image");
+			httpd_set_tag(r, TAG_RECEIVING);
+			return;
+		}
+		if (g_uploads > 0) g_uploads--;
+		httpd_set_tag(r, 0);
+		char part[XFER_PATH_MAX];
+		snprintf(part, sizeof part, "/tmp/tortos.img.part");
+		if (rename(part, abs) != 0) {
+			remove(part);
+			httpd_reply_status(r, 500, "could not put the image in place");
+			return;
+		}
+		note("staged firmware image at /tmp/tortos.img");
+		httpd_reply(r, 200, "text/plain", "ok", 2, NULL);
+		return;
+	}
+
+	if (!strcmp(path, "/api/ota/apply") && !strcmp(m, "POST")) {
+		if (!done) { httpd_want_body(r, HTTPD_BODY_NONE, NULL); return; }
+		struct stat st;
+		if (stat("/tmp/tortos.img", &st) != 0) {
+			httpd_reply_status(r, 404, "no firmware image staged");
+			return;
+		}
+		/* plastron owns the actual flash: it looks for /tmp/tortos.img on
+		 * the next boot and replaces the card's TortOS partition with it.
+		 * This endpoint only tells plastron the image is ready. */
+		FILE *f = fopen("/tmp/tortos_ota_ready", "w");
+		if (!f) {
+			httpd_reply_status(r, 500, "could not mark update ready");
+			return;
+		}
+		fprintf(f, "%ld\n", (long)st.st_size);
+		fclose(f);
+		note("OTA update flagged for plastron");
 		httpd_reply(r, 200, "text/plain", "ok", 2, NULL);
 		return;
 	}

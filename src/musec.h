@@ -158,4 +158,10 @@ bool musec_cover_take(char *base, size_t bn, char *file, size_t fn);
 bool musec_artist_ask(const char *dir);
 bool musec_artist_take(char *dir, size_t dn, char *name, size_t nn);
 
+/* Lời hiện tại và dòng kế theo, từ file .lrc cùng tên với bài (cùng thư mục,
+ * đuổi .lrc thay cho đuổi âm thanh). Trả chỉ số dòng hiện tại (-1 nếu chưa
+ * đến dòng đầu), và *next là chỉ số dòng sau (-1 nếu không có). out nhận
+ * dòng hiện tại. Không có file thì trả -1 và out trống. */
+int musec_lrc_at(int track_index, double at, char *out, size_t n, int *next_index);
+
 #endif

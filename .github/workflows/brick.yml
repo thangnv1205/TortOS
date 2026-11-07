@@ -1,0 +1,176 @@
+# Build TortOS + Diatom for the TrimUI Brick / Brick Hammer, and package an
+# UPDATE for an existing TortOS card (not a card image).
+#
+# Why not plastron: plastron builds the whole Linux system with Buildroot,
+# hours of work, to produce the sysroot TortOS links against. The device's
+# libraries are all ABI-stable sonames that Ubuntu 24.04 aarch64 also has, at
+# versions no newer than the device's:
+#
+#   glibc 2.39 (device 2.42)  SDL2 / SDL2_image / SDL2_ttf (-2.0.so.0)
+#   FFmpeg 6.1 -> libavcodec.so.60 etc., which is exactly what Muse needs
+#   sqlite3, zlib, ALSA, dbus
+#
+# So the native arm64 runner IS the sysroot, and the "Check ABI" step below
+# fails the build if a binary asks for a library or a glibc symbol version the
+# device does not have.
+name: Brick build
+
+on:
+  push:
+    branches: [brick-hammer]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      diatom_ref:
+        description: "Diatom branch/tag"
+        default: "brick-more-cores"
+      skip_checks:
+        description: "Skip make check (only to get a build out while a check is broken)"
+        type: boolean
+        default: false
+
+env:
+  # Diatom lives in its own repository. Override with repository variables
+  # DIATOM_REPO / DIATOM_REF (Settings > Secrets and variables > Variables).
+  DIATOM_REPO: ${{ vars.DIATOM_REPO || format('{0}/diatom', github.repository_owner) }}
+  DIATOM_REF: ${{ inputs.diatom_ref || vars.DIATOM_REF || 'brick-more-cores' }}
+  # Device limits, from the binaries on a TortOS 2.1.1 card (2026-11-07)
+  MAX_GLIBC: "2.42"
+  ALLOWED_LIBS: >-
+    libc.so.6 libm.so.6 libz.so.1 libasound.so.2 libsqlite3.so.0
+    libSDL2-2.0.so.0 libSDL2_image-2.0.so.0 libSDL2_ttf-2.0.so.0
+    libavformat.so.60 libavcodec.so.60 libavfilter.so.9 libavutil.so.58
+    libswresample.so.4 libdbus-1.so.3 libpthread.so.0 libdl.so.2
+  # Extra libretro cores this card's systems.cfg names, beyond upstream's.
+  EXTRA_CORES: >-
+    pcsx_rearmed picodrive prboom squirreljme
+    stella2014 prosystem handy mednafen_wswan mednafen_vb pokemini retro8
+    mame2003_plus fbneo
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    steps:
+      - name: Checkout TortOS
+        uses: actions/checkout@v4
+        with:
+          path: TortOS
+
+      - name: Checkout Diatom
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.DIATOM_REPO }}
+          ref: ${{ env.DIATOM_REF }}
+          path: diatom
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+            build-essential pkg-config zip unzip curl python3 python3-pil \
+            libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev \
+            libsqlite3-dev zlib1g-dev libasound2-dev libdbus-1-dev \
+            libavformat-dev libavcodec-dev libavfilter-dev libswresample-dev libavutil-dev
+
+      - name: Version
+        id: ver
+        working-directory: TortOS
+        run: |
+          base=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)
+          echo "version=${base:-2.1.1}-hammer.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      # Offline checks, as upstream runs before every commit. Both projects.
+      - name: TortOS checks (make check)
+        if: ${{ !inputs.skip_checks }}
+        working-directory: TortOS
+        run: make check
+      - name: Diatom checks (make check)
+        if: ${{ !inputs.skip_checks }}
+        working-directory: diatom
+        run: make check
+
+      - name: Build Diatom (PORT=brick)
+        working-directory: diatom
+        run: make PORT=brick CC=gcc -j"$(nproc)"
+
+      - name: Build TortOS launcher, Muse, btplayer
+        working-directory: TortOS
+        env:
+          # Optional: ScreenScraper developer pair. Unset is a supported build
+          # (box art from libretro only), see mk/cross.mk.
+          SS_DEVID: ${{ secrets.SS_DEVID }}
+          SS_DEVPASS: ${{ secrets.SS_DEVPASS }}
+        run: |
+          make -f mk/cross.mk DEVICE=brick CC=gcc SYSROOT=/ \
+               VERSION="${{ steps.ver.outputs.version }}" \
+               build/tortos.elf build/muse build/btplayer
+
+      - name: Check ABI against the device
+        run: |
+          set -e
+          fail=0
+          for f in TortOS/build/tortos.elf TortOS/build/muse TortOS/build/btplayer \
+                   diatom/build/brick/diatom; do
+            file "$f"
+            for lib in $(readelf -d "$f" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p'); do
+              case " $ALLOWED_LIBS " in
+                *" $lib "*) ;;
+                *) echo "::error file=$f::needs $lib, which the device does not have"; fail=1 ;;
+              esac
+            done
+            top=$(objdump -T "$f" | grep -oE 'GLIBC_[0-9.]+' | sed 's/GLIBC_//' | sort -Vu | tail -1)
+            echo "  newest glibc symbol: $top"
+            if [ "$(printf '%s\n%s\n' "$top" "$MAX_GLIBC" | sort -V | tail -1)" != "$MAX_GLIBC" ]; then
+              echo "::error file=$f::needs glibc $top > device $MAX_GLIBC"; fail=1
+            fi
+          done
+          exit $fail
+
+      - name: Fetch libretro cores (buildbot, linux/aarch64)
+        run: |
+          set -e
+          mkdir -p cores
+          for c in $EXTRA_CORES; do
+            curl -fsSL --retry 3 -o "/tmp/$c.zip" \
+              "https://buildbot.libretro.com/nightly/linux/aarch64/latest/${c}_libretro.so.zip"
+            unzip -oq "/tmp/$c.zip" -d cores
+          done
+          ls -la cores
+
+      - name: Package update
+        run: |
+          set -e
+          V="${{ steps.ver.outputs.version }}"
+          P=out/TortOS
+          mkdir -p "$P/cards" "$P/cores"
+          cp TortOS/build/tortos.elf TortOS/build/muse TortOS/build/btplayer "$P/"
+          cp diatom/build/brick/diatom "$P/"
+          cp TortOS/config/systems.cfg "$P/"
+          cp -R TortOS/res/cards/. "$P/cards/"
+          cp cores/*_libretro.so "$P/cores/"
+          echo "$V" > "$P/VERSION"
+          # launch.sh is NOT shipped: the card's copy may carry local changes.
+          cat > out/INSTALL.txt <<'EOF'
+          TortOS update for TrimUI Brick / Brick Hammer
+
+          1. Power the Brick off, put the card in a computer.
+          2. Back up TortOS/diatom, TortOS/tortos.elf, TortOS/muse,
+             TortOS/systems.cfg (e.g. rename to *.bak).
+          3. Copy this TortOS/ folder over the card's TortOS/, merging.
+          4. Eject, boot. Logs: .userdata/brick/logs/tortos.log
+          Revert: restore the *.bak files.
+          EOF
+          (cd out && sha256sum TortOS/tortos.elf TortOS/diatom TortOS/muse TortOS/btplayer > SHA256SUMS)
+          (cd out && zip -qr "../tortos-brick-update-$V.zip" .)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tortos-brick-update-${{ steps.ver.outputs.version }}
+          path: tortos-brick-update-*.zip
+          retention-days: 30

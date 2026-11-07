@@ -30,7 +30,22 @@
 #include <sys/stat.h>
 
 #include "../src/hare.h"
+#include "../src/net.h"
 #include "../src/xfer.h"
+
+/* net_get_buf is device-only (curl). Stub it for the offline check: the OTA
+ * check route is exercised for its shape, not for reaching GitHub. */
+long net_get_buf(const char *url, const net_field *f, int n,
+                 char *out, size_t outn, int timeout)
+{
+	(void)url; (void)f; (void)n; (void)timeout;
+	const char *fake = "{\"tag_name\":\"v1.2.3\","
+			   "\"url\":\"https://github.com/ericreinsmidt/TortOS/releases/latest\"}";
+	size_t len = strlen(fake);
+	if (len >= outn) return -1;
+	memcpy(out, fake, len + 1);
+	return (long)len;
+}
 
 static int failures;
 
@@ -420,6 +435,28 @@ int main(void)
 		           g_cookie) != 200, "an encoded rename escaped its directory");
 		CHECK(post("/api/rename?p=roms/NES/Contra.nes&to=sub%2fx", g_cookie)
 		      != 200, "a rename carried a separator");
+	}
+
+	printf("  OTA routes stay behind the PIN:\n");
+	{
+		/* Without a session every OTA route is refused. */
+		CHECK(get("/api/ota/check", NULL) == 401, "OTA check needs no PIN");
+		CHECK(req("PUT", "/api/ota/image", NULL, "X", 1, NULL, 0) == 401,
+		      "OTA image needs no PIN");
+		CHECK(post("/api/ota/apply", NULL) == 401, "OTA apply needs no PIN");
+
+		/* With a session they work. */
+		CHECK(get("/api/ota/check", g_cookie) == 200, "OTA check works with PIN");
+		{
+			char body[256];
+			CHECK(req("GET", "/api/ota/check", g_cookie, NULL, 0,
+			          body, sizeof body) == 200, "OTA check reply");
+			CHECK(strstr(body, "\"version\"") && strstr(body, "\"url\""),
+			      "OTA check has version and url: %s", body);
+		}
+		CHECK(req("PUT", "/api/ota/image", g_cookie, "FIRMWARE", 10, NULL, 0) == 200,
+		      "OTA image upload works with PIN");
+		CHECK(post("/api/ota/apply", g_cookie) == 200, "OTA apply works with PIN");
 	}
 
 	printf("  save states are reachable and the config beside them is not:\n");

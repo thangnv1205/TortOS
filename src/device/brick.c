@@ -1068,3 +1068,34 @@ bool plat_battery(int *pct, bool *charging)
 	return false;
 #endif
 }
+
+/* ---- temperature ----
+ *
+ * Millicelsius from whatever thermal zone the AXP2202 or the SoC exposes.
+ * Tries the usual names in order; returns false on none, which the UI treats
+ * as "no sensor". */
+bool plat_temperature(int *millic)
+{
+#ifdef __linux__
+	static const char *paths[] = {
+		"/sys/class/thermal/thermal_zone0/temp",
+		"/sys/class/thermal/thermal_zone1/temp",
+		"/sys/devices/virtual/thermal/thermal_zone0/temp",
+		"/sys/devices/platform/soc/xxxxxx/thermal/temp",
+		NULL,
+	};
+	for (int i = 0; paths[i]; i++) {
+		FILE *f = fopen(paths[i], "r");
+		if (!f) continue;
+		long v = -1;
+		if (fscanf(f, "%ld", &v) != 1) v = -1;
+		fclose(f);
+		if (v >= 0) {
+			if (millic) *millic = (int)v;
+			return true;
+		}
+	}
+#endif
+	(void)millic;
+	return false;
+}

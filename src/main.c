@@ -99,6 +99,9 @@ typedef struct {
 	 * whatever sits at index 0 is what an untouched card plays at - see the
 	 * note on DMODES itself. */
 	int dmode;
+	/* Index into DFILTERS, saved beside dmode under filter.<TAG> and sent on
+	 * the same SETDISPLAY line. Zero = nearest. */
+	int dfilter;
 	/* Index into SORTS. Zero is by name, which is what every shelf was
 	 * before this existed and what an untouched one still is. On Muse's
 	 * shelf an ml_order instead, whose zero is by artist. */
@@ -145,6 +148,17 @@ static const struct { const char *name, *label; } DMODES[] = {
 	{ "native",           "Native 1:1"   },
 };
 #define DMODE_COUNT ((int)(sizeof DMODES / sizeof DMODES[0]))
+
+/* What Diatom draws each frame with. Zero-initialized like dmode: index 0 is
+ * nearest, what an untouched system plays at. A system's filter is saved beside
+ * its display mode and sent on the same SETDISPLAY line. */
+static const struct { const char *name, *label; } DFILTERS[] = {
+	{ "nearest", "Nearest" },
+	{ "sharp",   "Sharp"   },
+	{ "scanline","Scanline" },
+	{ "grid",    "Grid"    },
+};
+#define DFILTER_COUNT ((int)(sizeof DFILTERS / sizeof DFILTERS[0]))
 
 typedef struct {
 	systems_cfg sys;
@@ -242,7 +256,7 @@ static void present_black(app *a)
 	SDL_SetRenderDrawBlendMode(a->r, SDL_BLENDMODE_BLEND);
 }
 
-/* ---------- per-system display mode --------------------------------------- */
+/* ---------- per-system display mode & filter ------------------------------ */
 
 /* Keyed on the system's tag rather than its folder or its place in the list,
  * for the same reason saves are: renaming a ROM folder or reordering
@@ -257,6 +271,10 @@ static void display_load(app *a)
 		if (!db_get_str(db_dev(), key, name, sizeof name, NULL)) continue;
 		for (k = 0; k < DMODE_COUNT; k++)
 			if (!strcmp(DMODES[k].name, name)) { a->view[i].dmode = k; break; }
+		snprintf(key, sizeof key, "filter.%s", a->sys.systems[i].tag);
+		if (!db_get_str(db_dev(), key, name, sizeof name, NULL)) continue;
+		for (k = 0; k < DFILTER_COUNT; k++)
+			if (!strcmp(DFILTERS[k].name, name)) { a->view[i].dfilter = k; break; }
 	}
 }
 
@@ -280,6 +298,8 @@ static void display_save(app *a)
 	for (i = 0; i < a->sys.count; i++) {
 		snprintf(key, sizeof key, "display.%s", a->sys.systems[i].tag);
 		db_set_str(db_dev(), key, DMODES[a->view[i].dmode].name);
+		snprintf(key, sizeof key, "filter.%s", a->sys.systems[i].tag);
+		db_set_str(db_dev(), key, DFILTERS[a->view[i].dfilter].name);
 	}
 }
 
@@ -6780,11 +6800,12 @@ static bool stats_screen(app *a)
 
 static void about_screen(app *a)
 {
-	char ver[48], addr[80], batt[32], up[48];
-	menu_row rows[4];
+	char ver[48], addr[80], batt[32], up[48], temp[32];
+	menu_row rows[5];
 	char ssid[WIFI_SSID_MAX], ip[64];
 	int pct = 0;
 	bool charging = false;
+	int millic = 0;
 	unsigned secs;
 	bool done = false;
 
@@ -6810,6 +6831,11 @@ static void about_screen(app *a)
 				         charging ? " charging" : "");
 			else
 				snprintf(batt, sizeof batt, "unknown");
+			if (plat_temperature(&millic))
+				snprintf(temp, sizeof temp, "%d.%d °C",
+				         millic / 1000, (millic % 1000) / 100);
+			else
+				snprintf(temp, sizeof temp, "no sensor");
 		}
 		secs = now / 1000;
 		snprintf(up, sizeof up, "%uh %02um", secs / 3600, (secs / 60) % 60);
@@ -6817,7 +6843,8 @@ static void about_screen(app *a)
 		rows[0] = (menu_row){ "Version",   ver,  false };
 		rows[1] = (menu_row){ "Address",   addr, false };
 		rows[2] = (menu_row){ "Battery",   batt, false };
-		rows[3] = (menu_row){ "Awake for", up,   false };
+		rows[3] = (menu_row){ "Temp",      temp, false };
+		rows[4] = (menu_row){ "Awake for", up,   false };
 
 		plat_input_poll(&a->in);
 		if (a->in.quit_requested) { a->running = false; return; }
@@ -6835,7 +6862,7 @@ static void about_screen(app *a)
 		SDL_SetRenderDrawBlendMode(a->r, SDL_BLENDMODE_BLEND);
 		SDL_SetRenderDrawColor(a->r, 0, 0, 0, 120);
 		SDL_RenderFillRect(a->r, NULL);
-		menu_draw(a, "About TortOS", rows, 4, -1, menu_std_width(a), MENU_ACCENT);
+		menu_draw(a, "About TortOS", rows, 5, -1, menu_std_width(a), MENU_ACCENT);
 		plat_draw_osd(a->r);
 		plat_present();
 		SDL_Delay(8);
@@ -7714,8 +7741,30 @@ static void gm_cycle_display(app *a, int d)
 
 	v->dmode = (v->dmode + d + DMODE_COUNT) % DMODE_COUNT;
 	display_save(a);
-	plat_resident_line("SETDISPLAY\tmode=%s", DMODES[v->dmode].name);
+	gm_send_display(a);
 	plat_resident_sync_rect(150);
+}
+
+/* Change the filter, keep it, tell the running game. Same per-system rule as
+ * the display mode: the filter chosen here wears the system that owns this
+ * shelf, not whatever Favorites pretends to be. */
+static void gm_cycle_filter(app *a, int d)
+{
+	sysview *v = owner_view(a);
+
+	v->dfilter = (v->dfilter + d + DFILTER_COUNT) % DFILTER_COUNT;
+	display_save(a);
+	gm_send_display(a);
+	plat_resident_sync_rect(150);
+}
+
+/* Send SETDISPLAY with both mode and filter on one line, so Diatom applies
+ * them together rather than one overriding the other. */
+static void gm_send_display(app *a)
+{
+	sysview *v = owner_view(a);
+	plat_resident_line("SETDISPLAY\tmode=%s\tfilter=%s",
+	                   DMODES[v->dmode].name, DFILTERS[v->dfilter].name);
 }
 
 /* What the in-game menu needs from the app, handed to gm_rows to become rows.
@@ -7725,6 +7774,8 @@ static int gm_build(app *a, menu_row *out, gm_bufs *b)
 	gm_ui u;
 
 	u.dmode  = DMODES[a->view[a->sys_cursor].dmode].label;
+	u.dfilter = DFILTERS[a->view[a->sys_cursor].dfilter].label;
+	u.controls = "MENU+R1: tua nhanh  •  MENU+L1 (giữ): tua lùi  •  X/Y: turbo A/B";
 	u.earned = chv_earned();
 	u.total  = chv_count();
 	return gm_rows(&u, out, b);
@@ -8196,7 +8247,7 @@ static void muse_cycle_mode(void)
 	muq_mode m = (muq_mode)((musec_mode() + 1) % MUQ_MODES);
 
 	musec_set_mode(m);
-	db_set_str(db_dev(), "muse.mode", MUSE_MODES[m].key);
+	db_set_str(db_lib(), "muse.mode", MUSE_MODES[m].key);
 }
 
 /* ---- Muse: what it is open over ------------------------------------------ */
@@ -8387,6 +8438,30 @@ static unsigned np_draw(app *a, const mu_now *mn, const char *next)
 	np_line(r, ui_font(UI_F_MENU), mn->artist, y, phase, UI_TEXT_SOFT, &wait);
 	y += ui_font_line(UI_F_MENU);
 	np_line(r, ui_font(UI_F_MENU), mn->album, y, phase, UI_TEXT_DIM, &wait);
+	y += ui_font_line(UI_F_MENU);
+	{
+		/* Lời hiện tại và dòng kế, từ file .lrc cùng tên với bài. Không
+		 * có file thì không hiện gì. */
+		char lrc_cur[160], lrc_next[160];
+		int lrc_cur_i, lrc_next_i;
+
+		lrc_cur_i = musec_lrc_at(mn->index, mn->at, lrc_cur, sizeof lrc_cur,
+		                         &lrc_next_i);
+		if (lrc_cur_i >= 0 && lrc_cur[0]) {
+			np_line(r, ui_font(UI_F_META), lrc_cur, y, phase,
+			        UI_TEXT_SOFT, &wait);
+			y += ui_font_line(UI_F_META);
+		}
+		if (lrc_next_i >= 0) {
+			/* Đọc lại .lrc chỉ để lấy dòng kế: file nhỏ, hiếm khi đọc. */
+			if (musec_lrc_at(mn->index, mn->at, lrc_next, sizeof lrc_next, NULL)
+			    == lrc_next_i && lrc_next[0]) {
+				np_line(r, ui_font(UI_F_META), lrc_next, y, phase,
+				        UI_TEXT_DIM, &wait);
+				y += ui_font_line(UI_F_META);
+			}
+		}
+	}
 
 	/* Where in the track. What is left rather than the whole length on the
 	 * right, because the question is usually how long until the next one. */
@@ -9573,6 +9648,10 @@ static menu_result gm_key(app *a, void *ctx, in_button key, int sel)
 		gm_cycle_display(a, key == IN_RIGHT ? 1 : -1);
 		return MENU_STAY;
 	}
+	if (sel == GM_FILTER && (key == IN_LEFT || key == IN_RIGHT)) {
+		gm_cycle_filter(a, key == IN_RIGHT ? 1 : -1);
+		return MENU_STAY;
+	}
 	if (key != IN_ACCEPT) return MENU_STAY;
 
 	switch ((gm_row)sel) {
@@ -9614,6 +9693,9 @@ static menu_result gm_key(app *a, void *ctx, in_button key, int sel)
 	 * was a row that looked broken. */
 	case GM_DISPLAY:
 		gm_cycle_display(a, +1);
+		break;
+	case GM_FILTER:
+		gm_cycle_filter(a, +1);
 		break;
 	case GM_CHEEVOS:
 		cheevos_screen(a, c->bg, false);
@@ -9953,8 +10035,9 @@ static void launch(app *a)
 			 * a system that has never been set would otherwise inherit
 			 * whatever the previous one chose. Ordered on the same socket, so
 			 * it lands before the first frame. */
-			plat_resident_line("SETDISPLAY\tmode=%s",
-			                   DMODES[a->view[o].dmode].name);
+			plat_resident_line("SETDISPLAY\tmode=%s\tfilter=%s",
+			                   DMODES[a->view[o].dmode].name,
+			                   DFILTERS[a->view[o].dfilter].name);
 
 			/* Auto Off. Out here rather than inside the chv_load branch
 			 * above, which is where the first version put it and is the same
@@ -10913,12 +10996,27 @@ static void muse_order_view(sysview *v)
 	for (k = 0; k < v->list.count; k++) {
 		game_entry *e = &v->list.items[k];
 		int al = v->album[k];
+		const char *p = g_muse.tracks[g_muse.albums[al].first].path;
+		const char *slash = strrchr(p, '/');
 
-		snprintf(e->name, sizeof e->name, "%s", g_muse.artists[muse_artist_of(al)].name);
-		snprintf(e->title, sizeof e->title, "%s", g_muse.albums[al].name);
+		if (v->sort == ML_BY_FOLDER) {
+			/* Folder order: the card is named by its folder, not its artist. */
+			if (slash) {
+				size_t flen = (size_t)(slash - p);
+				if (flen >= sizeof e->name) flen = sizeof e->name - 1;
+				memcpy(e->name, p, flen);
+				e->name[flen] = '\0';
+			} else {
+				snprintf(e->name, sizeof e->name, "%s", "Loose Files");
+			}
+			snprintf(e->title, sizeof e->title, "%s", g_muse.albums[al].name);
+		} else {
+			snprintf(e->name, sizeof e->name, "%s", g_muse.artists[muse_artist_of(al)].name);
+			snprintf(e->title, sizeof e->title, "%s", g_muse.albums[al].name);
+		}
 		muse_album_dir(al, e->file, sizeof e->file);
 	}
-	v->jump_by_name = v->sort == ML_BY_ARTIST;
+	v->jump_by_name = v->sort == ML_BY_ARTIST || v->sort == ML_BY_FOLDER;
 }
 
 /* A free name for `name` in `dir`: itself, or with " (2)", " (3)" ... before
@@ -12145,7 +12243,7 @@ int main(int argc, char *argv[])
 			char m[32];
 			int k;
 
-			db_get_str(db_dev(), "muse.mode", m, sizeof m, "in order");
+			db_get_str(db_lib(), "muse.mode", m, sizeof m, "in order");
 			if (shot_mode) snprintf(m, sizeof m, "%s", shot_mode);
 			for (k = 0; k < MUQ_MODES; k++)
 				if (!strcmp(m, MUSE_MODES[k].key)) musec_set_mode((muq_mode)k);

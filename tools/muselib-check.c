@@ -350,6 +350,171 @@ static void card(void)
 	ml_free(&l);
 }
 
+/* Loose files at the root of Music/ are not inside any artist folder. They
+ * should still show up as a "Loose Files" album. */
+static void loose(void)
+{
+	ml_lib l;
+	char card[300];
+	int loose;
+
+	snprintf(card, sizeof card, "%s/card", root);
+	dir("card");
+	dir("card/Music");
+	dir("card/Music/Radiohead");
+	dir("card/Music/Radiohead/The Bends");
+	touch("card/Music/Radiohead/The Bends/01 Planet Telex.mp3");
+	touch("card/Music/loose one.mp3");
+	touch("card/Music/loose two.flac");
+	touch("card/Music/notes.txt");          /* not audio */
+	touch("card/Music/.hidden.mp3");        /* dot file */
+
+	CHECK(ml_scan_card(card, &l), "flat mp3s at Music root still scan");
+	loose = album_named(&l, "Loose Files");
+	CHECK(loose >= 0, "a Loose Files album exists for the loose files");
+	if (loose < 0) { ml_free(&l); return; }
+	CHECK(l.albums[loose].singles, "the loose album is marked Singles");
+	CHECK(l.albums[loose].n == 2, "two loose audio files, not the text or dot: %d",
+	      l.albums[loose].n);
+	CHECK(!strcmp(l.tracks[l.albums[loose].first].name, "loose one"),
+	      "shown without extension or number: \"%s\"", l.tracks[l.albums[loose].first].name);
+	ml_free(&l);
+}
+
+/* The folder order keeps albums of the same folder together, and loose files
+ * at the end under "". */
+static void folder_order(void)
+{
+	ml_lib l;
+	char sub[400];
+	int out[8];
+
+	snprintf(sub, sizeof sub, "%s/folder", root);
+	dir("folder");
+	dir("folder/Radiohead");
+	dir("folder/Radiohead/The Bends");
+	dir("folder/Radiohead/amnesiac");
+	dir("folder/Blur");
+	dir("folder/Blur/Parklife");
+	touch("folder/Radiohead/The Bends/01 Planet Telex.mp3");
+	touch("folder/Radiohead/amnesiac/01 Packt.mp3");
+	touch("folder/Blur/Parklife/01 Girls And Boys.mp3");
+	touch("folder/solo.mp3");                            /* root-level: loose */
+	CHECK(ml_scan(sub, &l) && l.nalbums == 3, "three albums: %d", l.nalbums);
+	if (l.nalbums != 3) { ml_free(&l); return; }
+
+	CHECK(ml_shelf_order(&l, ML_BY_FOLDER, false, out) == 3, "every album ordered");
+	/* Blur's folder sorts before Radiohead's (alphabetical). Both Radiohead
+	 * albums stay together under their folder. */
+	CHECK(!strncmp(l.tracks[l.albums[out[0]].first].path, "Blur/", 5),
+	      "folder order starts with Blur: %s", l.tracks[l.albums[out[0]].first].path);
+	CHECK(!strncmp(l.tracks[l.albums[out[1]].first].path, "Radiohead/", 10),
+	      "then Radiohead's The Bends: %s", l.tracks[l.albums[out[1]].first].path);
+	CHECK(!strncmp(l.tracks[l.albums[out[2]].first].path, "Radiohead/", 10),
+	      "Radiohead stays together: %s", l.tracks[l.albums[out[2]].first].path);
+	ml_free(&l);
+}
+
+/* Một file .m3u ở Music/: các bài được liệt kê, đường dẫn tương đối,
+ * đường dẫn thoát khỏi Music/ ("..", "/" đầu dòng) bị chặn. */
+static void playlist(void)
+{
+	ml_lib l;
+	char card[300];
+	char pl[512];
+	FILE *f;
+	int pl_idx;
+
+	snprintf(card, sizeof card, "%s/card", root);
+	dir("card");
+	dir("card/Music");
+	dir("card/Music/Artist");
+	dir("card/Music/Artist/Album");
+	touch("card/Music/Artist/Album/01 One.mp3");
+	touch("card/Music/Artist/Album/02 Two.flac");
+	touch("card/Music/loose.mp3");
+	snprintf(pl, sizeof pl, "%s/card/Music/My Mix.m3u", root);
+	if ((f = fopen(pl, "w"))) {
+		fputs("Artist/Album/01 One.mp3\n", f);
+		fputs("Artist/Album/02 Two.flac\n", f);
+		fputs("../escape.txt\n", f);
+		fputs("/mnt/SDCARD/elsewhere.mp3\n", f);
+		fputs("# comment\n", f);
+		fputs("\n", f);
+		fclose(f);
+	}
+	CHECK(ml_scan_card(card, &l), "playlist scan");
+	pl_idx = album_named(&l, "My Mix");
+	CHECK(pl_idx >= 0, "playlist album exists");
+	if (pl_idx < 0) { ml_free(&l); return; }
+	CHECK(l.albums[pl_idx].n == 2, "playlist has two tracks, not four: %d",
+	      l.albums[pl_idx].n);
+	ml_free(&l);
+}
+
+/* Một file .lrc: [mm:ss.xx] và [mm:ss,xx] đều nhận, dòng không dấu thời gian
+ * bị bỏ qua, tìm dòng hiện tại và dòng kế theo thời gian phát. */
+static void lrc(void)
+{
+	ml_lrc_line lrc_lines[ML_LRC_MAX];
+	int nl, cur, nxt;
+	char path[300];
+	FILE *f;
+
+	snprintf(path, sizeof path, "%s/song.mp3", root);
+	{
+		char lrc_path[300];
+		snprintf(lrc_path, sizeof lrc_path, "%s/song.lrc", root);
+		if ((f = fopen(lrc_path, "w"))) {
+			fputs("[00:00.00]First line\n", f);
+			fputs("[00:05.50]Second line\n", f);
+			fputs("[00:10,25]Third line\n", f);
+			fputs("not a timestamp\n", f);
+			fputs("[bad]ignored\n", f);
+			fclose(f);
+		}
+	}
+	/* ml_lrc_read replaces the extension with .lrc, so song.mp3 → song.lrc */
+
+	nl = ml_lrc_read(path, lrc_lines);
+	CHECK(nl == 3, "three timestamp lines, not five: %d", nl);
+	if (nl < 3) return;
+
+	cur = ml_lrc_at(lrc_lines, nl, 0.0, &nxt);
+	CHECK(cur == 0, "at zero: first line, got %d", cur);
+	CHECK(nxt == 1, "and next is second, got %d", nxt);
+
+	cur = ml_lrc_at(lrc_lines, nl, 5.5, &nxt);
+	CHECK(cur == 1, "at 5.5s: second line, got %d", cur);
+	CHECK(nxt == 2, "and next is third, got %d", nxt);
+
+	cur = ml_lrc_at(lrc_lines, nl, 10.25, &nxt);
+	CHECK(cur == 2, "at 10.25s: third line, got %d", cur);
+	CHECK(nxt == -1, "and no next, got %d", nxt);
+
+	cur = ml_lrc_at(lrc_lines, nl, -1.0, &nxt);
+	CHECK(cur == -1, "before the first: nothing, got %d", cur);
+	CHECK(nxt == 0, "next is still first, got %d", nxt);
+
+	cur = ml_lrc_at(lrc_lines, nl, 999.0, &nxt);
+	CHECK(cur == 2, "after the last: still third, got %d", cur);
+	CHECK(nxt == -1, "and no next, got %d", nxt);
+}
+
+/* Không có file .lrc: không crash, không hiện gì. */
+static void lrc_missing(void)
+{
+	ml_lrc_line lrc_lines[ML_LRC_MAX];
+	int cur, nxt, nl;
+	char path[300];
+
+	snprintf(path, sizeof path, "%s/nonexistent.mp3", root);
+	nl = ml_lrc_read(path, lrc_lines);
+	CHECK(nl == -1, "missing .lrc returns -1: %d", nl);
+	cur = ml_lrc_at(lrc_lines, 0, 0.0, &nxt);
+	CHECK(cur == -1 && nxt == -1, "no lines: cur %d next %d", cur, nxt);
+}
+
 int main(void)
 {
 	char cmd[300];
@@ -362,6 +527,11 @@ int main(void)
 	scan();
 	orders();
 	card();
+	loose();
+	folder_order();
+	playlist();
+	lrc();
+	lrc_missing();
 
 	snprintf(cmd, sizeof cmd, "rm -rf '%s'", root);
 	if (system(cmd) != 0) { }

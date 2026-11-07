@@ -672,4 +672,28 @@ const char *musec_path(void)
 	return t >= 0 && t < g_qn ? g_q[t] : "";
 }
 
+/* Lời hiện tại và dòng kế theo từ file .lrc cùng tên với bài. `track_index`
+ * chỉ vào bài trong hàng đợi, `at` là giây đã phát. out nhận dòng hiện tại,
+ * *next_index chỉ số dòng sau. */
+int musec_lrc_at(int track_index, double at, char *out, size_t n,
+                 int *next_index)
+{
+	char full[LIB_PATH * 2];
+	ml_lrc_line lrc[ML_LRC_MAX];
+	int nl, cur;
+
+	if (track_index < 0 || track_index >= g_qn) { if (next_index) *next_index = -1; return -1; }
+	if (!out || n == 0) { if (next_index) *next_index = -1; return -1; }
+	out[0] = '\0';
+	if (next_index) *next_index = -1;
+
+	snprintf(full, sizeof full, "%s/%s", g_root, g_q[track_index]);
+	nl = ml_lrc_read(full, lrc);
+	if (nl <= 0) return -1;
+	cur = ml_lrc_at(lrc, nl, at, next_index);
+	if (cur < 0) return -1;
+	snprintf(out, n, "%s", lrc[cur].line);
+	return cur;
+}
+
 bool musec_playing(void) { return g_now.state == MU_PLAYING; }

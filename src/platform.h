@@ -290,6 +290,10 @@ Uint32 plat_osd_until(void);
 
 bool plat_battery(int *pct, bool *charging);
 
+/* Degrees millicelsius from a thermal zone, if the device exposes one.
+ * False when there is no sensor. */
+bool plat_temperature(int *millic);
+
 /* Whether the device has a Wi-Fi or Bluetooth radio at all - not whether it
  * is on. A radio that is off is the player's to turn on; a device without one
  * hides everything that needs it (src/sys_menu.h). */

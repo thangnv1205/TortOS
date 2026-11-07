@@ -28,6 +28,14 @@ bool ml_is_audio(const char *name)
 	return false;
 }
 
+bool ml_is_playlist(const char *name)
+{
+	const char *dot = strrchr(name, '.');
+
+	if (!dot || name[0] == '.') return false;
+	return !strcasecmp(dot + 1, "m3u") || !strcasecmp(dot + 1, "m3u8");
+}
+
 /* Whether `s` joins its words with dots or underscores instead of spaces:
  * no space at all, two words or more, and one of them three letters or more,
  * so "Used.To.Be" is words and "R.E.M." is initials */
@@ -64,7 +72,13 @@ static bool unscene(char *s)
 
 void ml_clean_words(char *s)
 {
+	char nfc[256];
+
 	unscene(s);
+	if (strlen(s) < sizeof nfc) {
+		size_t len = ml_utf8_nfd_to_nfc(s, nfc, sizeof nfc);
+		if (len > 0 && len < sizeof nfc) memcpy(s, nfc, len + 1);
+	}
 }
 
 /* A word that only says what format or bitrate a download was */
@@ -197,7 +211,162 @@ void ml_track_name(const char *file, char *out, int n)
 	ml_clean_words(out);
 }
 
-/* How much of a path is its folder: "A/B/c.mp3" is 3, "c.mp3" is 0. */
+/* UTF-8 NFD → NFC cho tên file trên macOS (HFS+ lưu tên dưới dạng tổ hợp,
+ * ví dụ "á" = "a" + U+0300). Dấu được viết lại thành mẫu đơn khi có thể, và
+ * các ký tự khác giữ nguyên. Không phải bộ mã hóa Unicode đầy đủ - chỉ các
+ * dấu kết hợp phổ biến trong tiếng Việt, đủ cho hiển thị trên menu. */
+static unsigned utf8_decode(const char **p, const char *end)
+{
+	const unsigned char *s = (const unsigned char *)*p;
+	unsigned c;
+
+	if (s >= (const unsigned char *)end) return 0;
+	if (*s < 0x80) { (*p)++; return *s; }
+	if ((*s & 0xE0) == 0xC0 && s + 1 < (const unsigned char *)end) {
+		c = ((s[0] & 0x1F) << 6) | (s[1] & 0x3F);
+		*p += 2; return c;
+	}
+	if ((*s & 0xF0) == 0xE0 && s + 2 < (const unsigned char *)end) {
+		c = ((s[0] & 0x0F) << 12) | ((s[1] & 0x3F) << 6) | (s[2] & 0x3F);
+		*p += 3; return c;
+	}
+	if ((*s & 0xF8) == 0xF0 && s + 3 < (const unsigned char *)end) {
+		c = ((s[0] & 0x07) << 18) | ((s[1] & 0x3F) << 12) |
+		    ((s[2] & 0x3F) << 6) | (s[3] & 0x3F);
+		*p += 4; return c;
+	}
+	(*p)++; return '?';
+}
+
+/* Ghi mã điểm Unicode `c` dưới dạng UTF-8 vào `*p`, dùng hết `end`. */
+static int utf8_encode(unsigned c, char **p, const char *end)
+{
+	char *w = *p;
+
+	if (c < 0x80) {
+		if (w + 1 >= end) return 0;
+		*w++ = (char)c;
+	} else if (c < 0x800) {
+		if (w + 2 >= end) return 0;
+		*w++ = (char)(0xC0 | (c >> 6));
+		*w++ = (char)(0x80 | (c & 0x3F));
+	} else if (c < 0x10000) {
+		if (w + 3 >= end) return 0;
+		*w++ = (char)(0xE0 | (c >> 12));
+		*w++ = (char)(0x80 | ((c >> 6) & 0x3F));
+		*w++ = (char)(0x80 | (c & 0x3F));
+	} else {
+		if (w + 4 >= end) return 0;
+		*w++ = (char)(0xF0 | (c >> 18));
+		*w++ = (char)(0x80 | ((c >> 12) & 0x3F));
+		*w++ = (char)(0x80 | ((c >> 6) & 0x3F));
+		*w++ = (char)(0x80 | (c & 0x3F));
+	}
+	*p = w;
+	return 1;
+}
+
+/* Một cặp (chữ cái chính, dấu kết hợp) → chữ cái đơn có dấu. Trả 0 khi không
+ * phải cặp này. Dấu tiếng Việt: grave U+0300, acute U+0301, hook above U+0309,
+ * dot below U+0323, tilde U+0303. */
+static unsigned compose_pair(unsigned base, unsigned mark)
+{
+	/* base + combining grave (U+0300) */
+	if (mark == 0x0300) {
+		switch (base) {
+		case 'a': return 0x00E0; case 'A': return 0x00C0;
+		case 'e': return 0x00E8; case 'E': return 0x00C8;
+		case 'i': return 0x00EC; case 'I': return 0x00CC;
+		case 'o': return 0x00F2; case 'O': return 0x00D2;
+		case 'u': return 0x00F9; case 'U': return 0x00D9;
+		case 'y': return 0x1EF3; case 'Y': return 0x1EF2;
+		}
+	}
+	/* base + combining acute (U+0301) */
+	if (mark == 0x0301) {
+		switch (base) {
+		case 'a': return 0x00E1; case 'A': return 0x00C1;
+		case 'e': return 0x00E9; case 'E': return 0x00C9;
+		case 'i': return 0x00ED; case 'I': return 0x00CD;
+		case 'o': return 0x00F3; case 'O': return 0x00D3;
+		case 'u': return 0x00FA; case 'U': return 0x00DA;
+		case 'y': return 0x1EF5; case 'Y': return 0x1EF4;
+		}
+	}
+	/* base + combining hook above (U+0309) */
+	if (mark == 0x0309) {
+		switch (base) {
+		case 'a': return 0x1EA3; case 'A': return 0x1EA2;
+		case 'e': return 0x1EB9; case 'E': return 0x1EB8;
+		case 'i': return 0x1ECB; case 'I': return 0x1ECA;
+		case 'o': return 0x1ECD; case 'O': return 0x1ECC;
+		case 'u': return 0x1EE9; case 'U': return 0x1EE8;
+		case 'y': return 0x1EF7; case 'Y': return 0x1EF6;
+		}
+	}
+	/* base + combining dot below (U+0323) */
+	if (mark == 0x0323) {
+		switch (base) {
+		case 'a': return 0x1EA1; case 'A': return 0x1EA0;
+		case 'd': return 0x1E0F; case 'D': return 0x1E0E;
+		case 'e': return 0x1EB1; case 'E': return 0x1EB0;
+		case 'o': return 0x1ECE; case 'O': return 0x1ECD;
+		case 'u': return 0x1EE7; case 'U': return 0x1EE6;
+		case 'y': return 0x1EF6; case 'Y': return 0x1EF5;
+		}
+	}
+	/* base + combining tilde (U+0303) */
+	if (mark == 0x0303) {
+		switch (base) {
+		case 'a': return 0x00E3; case 'A': return 0x00C3;
+		case 'e': return 0x1EBD; case 'E': return 0x1EBC;
+		case 'i': return 0x0129; case 'I': return 0x0128;
+		case 'o': return 0x00F5; case 'O': return 0x00D5;
+		case 'u': return 0x0169; case 'U': return 0x0168;
+		case 'y': return 0x1EF9; case 'Y': return 0x1EF8;
+		}
+	}
+	return 0;
+}
+
+/* `in` dưới dạng NFD (chữ cái + dấu kết hợp riêng) về NFC (chữ cái đơn có
+ * dấu) trong `out`. `outn` là kích thước `out`. Trả độ dài của `out`, không
+ * tính NUL. Dấu tiếng Việt được ghép lại; các ký tự khác giữ nguyên. */
+size_t ml_utf8_nfd_to_nfc(const char *in, char *out, size_t outn)
+{
+	const char *p = in, *end = in + strlen(in);
+	char *w = out;
+	unsigned c, mark = 0;
+	bool have_mark = false;
+
+	while (p < end && w + 1 < out + outn) {
+		c = utf8_decode(&p, end);
+		/* Dấu kết hợp U+0300-U+036F. */
+		if (c >= 0x0300 && c <= 0x036F && !have_mark) {
+			mark = c;
+			have_mark = true;
+			continue;
+		}
+		if (have_mark) {
+			unsigned cp = compose_pair(c, mark);
+			if (cp) {
+				if (!utf8_encode(cp, &w, out + outn)) break;
+			} else {
+				if (!utf8_encode(mark, &w, out + outn)) break;
+				if (!utf8_encode(c, &w, out + outn)) break;
+			}
+			have_mark = false;
+			mark = 0;
+		} else {
+			if (!utf8_encode(c, &w, out + outn)) break;
+		}
+	}
+	if (have_mark && w + 1 < out + outn) {
+		if (!utf8_encode(mark, &w, out + outn)) {}
+	}
+	*w = '\0';
+	return (size_t)(w - out);
+}
 static size_t dir_len(const char *path)
 {
 	const char *s = strrchr(path, '/');
@@ -274,7 +443,8 @@ static void names_free(names *l)
 /* The subfolders and the audio files in `dir`, each sorted. Dot entries are
  * skipped: macOS leaves AppleDouble files beside every copied track, and they
  * carry the track's own extension. */
-static void list_dir(const char *dir, names *dirs, names *files)
+static void list_dir(const char *dir, names *dirs, names *files,
+                     names *pls)
 {
 	DIR *d = opendir(dir);
 	struct dirent *e;
@@ -289,11 +459,15 @@ static void list_dir(const char *dir, names *dirs, names *files)
 			continue;
 		if (stat(full, &st) != 0) continue;
 		if (S_ISDIR(st.st_mode)) { if (dirs) names_add(dirs, e->d_name); }
-		else if (files && ml_is_audio(e->d_name)) names_add(files, e->d_name);
+		else {
+			if (files && ml_is_audio(e->d_name)) names_add(files, e->d_name);
+			if (pls && ml_is_playlist(e->d_name)) names_add(pls, e->d_name);
+		}
 	}
 	closedir(d);
 	if (dirs)  qsort(dirs->v, (size_t)dirs->n, sizeof *dirs->v, cmp_name);
 	if (files) qsort(files->v, (size_t)files->n, sizeof *files->v, cmp_name);
+	if (pls)  qsort(pls->v, (size_t)pls->n, sizeof *pls->v, cmp_name);
 }
 
 /* ---- the library ---------------------------------------------------------- */
@@ -329,16 +503,141 @@ static void add_album(ml_lib *l, int *acap, int *tcap, bool book,
 	al->n = 0;
 	for (i = 0; i < files->n; i++) {
 		ml_track *t;
+		int len;
 
 		if (!grow((void **)&l->tracks, l->ntracks, tcap, sizeof *l->tracks)) break;
 		t = &l->tracks[l->ntracks];
-		if (snprintf(t->path, sizeof t->path, "%s/%s", rel, files->v[i])
-		    >= (int)sizeof t->path)
-			continue;
+		if (rel[0])
+			len = snprintf(t->path, sizeof t->path, "%s/%s", rel, files->v[i]);
+		else
+			len = snprintf(t->path, sizeof t->path, "%s", files->v[i]);
+		if (len >= (int)sizeof t->path) continue;
 		ml_track_name(files->v[i], t->name, sizeof t->name);
 		l->ntracks++;
 		al->n++;
 	}
+}
+
+/* Read a .m3u/.m3u8 playlist. Each non-blank, non-comment line is a track
+ * path, relative to `music_root`. Paths that climb out of `music_root`
+ * ("..", leading "/", absolute) are refused - the same rule xfer_resolve
+ * uses for every path the browser sends. Returns the number of tracks read,
+ * or -1 on error. `out` must hold at least `max` entries. */
+int ml_playlist_read(const char *playlist_path, const char *music_root,
+                     ml_track *out, int max)
+{
+	FILE *f;
+	char line[512];
+	int n = 0;
+
+	if (!playlist_path || !music_root || !out || max <= 0) return -1;
+	f = fopen(playlist_path, "r");
+	if (!f) return -1;
+	while (fgets(line, sizeof line, f)) {
+		char *p = line, *end;
+		char abs[LIB_PATH * 2];
+		size_t rootlen;
+
+		/* Strip trailing newline and whitespace. */
+		end = line + strlen(line);
+		while (end > line && (end[-1] == '\n' || end[-1] == '\r' ||
+		                      end[-1] == ' ' || end[-1] == '\t'))
+			*--end = '\0';
+		while (*p == ' ' || *p == '\t') p++;
+		if (!*p || *p == '#') continue;      /* blank or comment */
+
+		/* Absolute paths are refused: a playlist cannot reach outside
+		 * Music/ by naming /mnt/SDCARD/... directly. */
+		if (*p == '/') continue;
+
+		/* Component by component: ".." anywhere means escape. */
+		{
+			const char *seg = p;
+			bool bad = false;
+			while (*seg) {
+				const char *next = strchr(seg, '/');
+				size_t seglen = next ? (size_t)(next - seg) : strlen(seg);
+				if (seglen == 2 && seg[0] == '.' && seg[1] == '.') { bad = true; break; }
+				if (seglen == 1 && seg[0] == '.') { /* skip "." */ }
+				if (next) seg = next + 1; else break;
+			}
+			if (bad) continue;
+		}
+
+		rootlen = strlen(music_root);
+		if (rootlen + 1 + strlen(p) >= sizeof abs) continue;
+		snprintf(abs, sizeof abs, "%s/%s", music_root, p);
+
+		/* Only audio files are playable from a playlist. */
+		if (!ml_is_audio(abs)) continue;
+
+		if (n >= max) break;
+		snprintf(out[n].path, sizeof out[n].path, "%s", p);
+		ml_track_name(p, out[n].name, sizeof out[n].name);
+		n++;
+	}
+	fclose(f);
+	return n;
+}
+
+/* Parse "[mm:ss.xx]text" or "[mm:ss,xx]txt" into seconds + text. Returns
+ * seconds, or -1 when the line is not a timestamped lyric line. */
+static double lrc_time(const char *s, const char **text)
+{
+	int m, s_;
+	double ms = 0;
+	char sep;
+
+	/* [mm:ss.xx] or [mm:ss,xx] */
+	if (sscanf(s, "[%d:%d%c%lf]", &m, &s_, &sep, &ms) != 4) return -1;
+	if (sep != '.' && sep != ',') return -1;
+	if (m < 0 || s_ < 0 || s_ >= 60) return -1;
+	*text = strchr(s, ']');
+	if (!*text) return -1;
+	(*text)++;
+	return m * 60 + s_ + ms / 100.0;
+}
+
+int ml_lrc_read(const char *audio_path, ml_lrc_line *out)
+{
+	char lrc[LIB_PATH], line[512];
+	FILE *f;
+	int n = 0;
+
+	if (!audio_path || !out) return -1;
+	snprintf(lrc, sizeof lrc, "%s", audio_path);
+	{
+		char *dot = strrchr(lrc, '.');
+		if (dot) snprintf(dot, sizeof lrc - (size_t)(dot - lrc), ".lrc");
+	}
+	f = fopen(lrc, "r");
+	if (!f) return -1;
+	while (fgets(line, sizeof line, f)) {
+		const char *text;
+		double at;
+
+		at = lrc_time(line, &text);
+		if (at < 0 || !text) continue;
+		if (n >= ML_LRC_MAX) break;
+		out[n].at = at;
+		snprintf(out[n].line, sizeof out[n].line, "%s", text);
+		n++;
+	}
+	fclose(f);
+	return n;
+}
+
+int ml_lrc_at(const ml_lrc_line *lrc, int n, double at, int *next)
+{
+	int cur = -1, nx = -1, i;
+
+	if (!lrc || n <= 0) { if (next) *next = -1; return -1; }
+	for (i = 0; i < n; i++) {
+		if (lrc[i].at <= at + 0.05) cur = i;      /* small slack */
+		else { nx = i; break; }
+	}
+	if (next) *next = nx;
+	return cur;
 }
 
 /* How far each array has grown, across the folders one library is read from. */
@@ -349,13 +648,13 @@ typedef struct { int a, t, r; } caps;
 static bool scan_into(ml_lib *out, caps *c, const char *root, const char *prefix,
                       bool book)
 {
-	names top = { 0 };
+	names top = { 0 }, pls = { 0 };
 	int i;
 	struct stat st;
 
 	if (stat(root, &st) != 0 || !S_ISDIR(st.st_mode)) return false;
 
-	list_dir(root, &top, NULL);
+	list_dir(root, &top, NULL, &pls);
 	for (i = 0; i < top.n; i++) {
 		char dir[LIB_PATH * 2];
 		names sub = { 0 }, files = { 0 };
@@ -365,7 +664,7 @@ static bool scan_into(ml_lib *out, caps *c, const char *root, const char *prefix
 		char top_rel[LIB_PATH];
 
 		snprintf(dir, sizeof dir, "%s/%s", root, top.v[i]);
-		list_dir(dir, &sub, &files);
+		list_dir(dir, &sub, &files, NULL);
 		if (prefix[0]) snprintf(top_rel, sizeof top_rel, "%s/%s", prefix, top.v[i]);
 		else           snprintf(top_rel, sizeof top_rel, "%s", top.v[i]);
 
@@ -379,7 +678,7 @@ static bool scan_into(ml_lib *out, caps *c, const char *root, const char *prefix
 
 			snprintf(adir, sizeof adir, "%s/%s", dir, sub.v[j]);
 			snprintf(rel, sizeof rel, "%s/%s", top_rel, sub.v[j]);
-			list_dir(adir, NULL, &tracks);
+			list_dir(adir, NULL, &tracks, NULL);
 			add_album(out, &c->a, &c->t, book, rel, sub.v[j], &tracks);
 			names_free(&tracks);
 		}
@@ -403,7 +702,53 @@ static bool scan_into(ml_lib *out, caps *c, const char *root, const char *prefix
 		ar->n = out->nalbums - before;
 		ar->book = book;
 	}
+	/* Mỗi file .m3u/.m3u8 ở `root` là một playlist: một album có tên theo file,
+	 * các bài là những đường dẫn trong nó, và chắc chắn không thoát khỏi root. */
+	for (i = 0; i < pls.n; i++) {
+		char pl_path[LIB_PATH * 2], pl_rel[LIB_PATH];
+		ml_track pl_trk[256];
+		int ntrk, before = out->nalbums, j;
+
+		if (prefix[0]) snprintf(pl_rel, sizeof pl_rel, "%s/%s", prefix, pls.v[i]);
+		else           snprintf(pl_rel, sizeof pl_rel, "%s", pls.v[i]);
+		snprintf(pl_path, sizeof pl_path, "%s/%s", root, pls.v[i]);
+		ntrk = ml_playlist_read(pl_path, root, pl_trk,
+		                        (int)(sizeof pl_trk / sizeof pl_trk[0]));
+		if (ntrk <= 0) continue;
+		if (!grow((void **)&out->albums, out->nalbums, &c->a, sizeof *out->albums)) break;
+		{
+			ml_album *al = &out->albums[out->nalbums++];
+			const char *dot = strrchr(pls.v[i], '.');
+			size_t stem = dot ? (size_t)(dot - pls.v[i]) : strlen(pls.v[i]);
+
+			if (stem >= sizeof al->name) stem = sizeof al->name - 1;
+			memcpy(al->name, pls.v[i], stem);
+			al->name[stem] = '\0';
+			al->book = book;
+			al->singles = false;
+			al->first = out->ntracks;
+			al->n = 0;
+			for (j = 0; j < ntrk; j++) {
+				ml_track *t;
+				if (!grow((void **)&out->tracks, out->ntracks, &c->t, sizeof *out->tracks)) break;
+				t = &out->tracks[out->ntracks];
+				snprintf(t->path, sizeof t->path, "%s/%s", pl_rel, pl_trk[j].path);
+				snprintf(t->name, sizeof t->name, "%s", pl_trk[j].name);
+				out->ntracks++;
+				al->n++;
+			}
+		}
+		if (out->nalbums > before) {
+			if (!grow((void **)&out->artists, out->nartists, &c->r, sizeof *out->artists)) break;
+			ml_artist *ar = &out->artists[out->nartists++];
+			snprintf(ar->name, sizeof ar->name, "%s", "Playlists");
+			ar->first = before;
+			ar->n = out->nalbums - before;
+			ar->book = book;
+		}
+	}
 	names_free(&top);
+	names_free(&pls);
 	return true;
 }
 
@@ -424,6 +769,28 @@ bool ml_scan_card(const char *card, ml_lib *out)
 	memset(out, 0, sizeof *out);
 	snprintf(dir, sizeof dir, "%s/Music", card);
 	music = scan_into(out, &c, dir, "Music", false);
+	/* File âm thanh thẳng ở gốc Music/ (không trong thư mục nghệ sĩ nào)
+	 * vẫn phải có trên kệ: gom vào một album "Loose Files". */
+	{
+		names files = { 0 };
+		list_dir(dir, NULL, &files, NULL);
+		if (files.n > 0) {
+			int before = out->nalbums;
+			add_album(out, &c.a, &c.t, false, "Music", "Loose Files", &files);
+			if (out->nalbums > before) {
+				out->albums[before].singles = true;
+				if (grow((void **)&out->artists, out->nartists, &c.r,
+				         sizeof *out->artists)) {
+					ml_artist *ar = &out->artists[out->nartists++];
+					snprintf(ar->name, sizeof ar->name, "%s", "Loose Files");
+					ar->first = before;
+					ar->n = out->nalbums - before;
+					ar->book = false;
+				}
+			}
+		}
+		names_free(&files);
+	}
 	snprintf(dir, sizeof dir, "%s/Audiobooks", card);
 	books = scan_into(out, &c, dir, "Audiobooks", true);
 	return music || books;
@@ -484,6 +851,7 @@ void ml_free(ml_lib *lib)
 static const struct { const char *name, *label, *book; } ORDERS[ML_ORDERS] = {
 	[ML_BY_ARTIST] = { "artist", "Artist", "Author" },
 	[ML_BY_ALBUM]  = { "album",  "Album",  "Title"  },
+	[ML_BY_FOLDER] = { "folder", "Folder", "Folder" },
 };
 
 const char *ml_order_name(ml_order o)
@@ -521,22 +889,57 @@ static int by_album(const void *a, const void *b)
 	return c ? c : x->al - y->al;
 }
 
+/* An album as the folder order compares it: its folder path, with the album
+ * name as tie-break. Two albums in the same folder stay together, and the
+ * shelf reads as folders instead of artists. */
+typedef struct { const char *folder; const char *album; int al; } folder_key;
+
+static int by_folder(const void *a, const void *b)
+{
+	const folder_key *x = a, *y = b;
+	int c = strcasecmp(x->folder, y->folder);
+
+	if (c) return c;
+	c = strcasecmp(x->album, y->album);
+	return c ? c : x->al - y->al;
+}
+
 int ml_shelf_order(const ml_lib *l, ml_order by, bool books, int *out)
 {
 	shelf_key *k;
+	folder_key *fk;
 	int i, n = 0;
 
 	for (i = 0; i < l->nalbums; i++)                  /* the scan's, by artist */
 		if (l->albums[i].book == books) out[n++] = i;
-	if (by != ML_BY_ALBUM || n < 2) return n;
-	k = malloc(sizeof *k * (size_t)n);
-	if (!k) return n;
-	for (i = 0; i < n; i++) {
-		k[i].album = l->albums[out[i]].name;
-		k[i].al    = out[i];
+	if (by == ML_BY_ALBUM) {
+		if (n < 2) return n;
+		k = malloc(sizeof *k * (size_t)n);
+		if (!k) return n;
+		for (i = 0; i < n; i++) {
+			k[i].album = l->albums[out[i]].name;
+			k[i].al    = out[i];
+		}
+		qsort(k, (size_t)n, sizeof *k, by_album);
+		for (i = 0; i < n; i++) out[i] = k[i].al;
+		free(k);
+		return n;
 	}
-	qsort(k, (size_t)n, sizeof *k, by_album);
-	for (i = 0; i < n; i++) out[i] = k[i].al;
-	free(k);
+	if (by == ML_BY_FOLDER) {
+		if (n < 2) return n;
+		fk = malloc(sizeof *fk * (size_t)n);
+		if (!fk) return n;
+		for (i = 0; i < n; i++) {
+			const char *p = l->tracks[l->albums[out[i]].first].path;
+			const char *slash = strrchr(p, '/');
+			fk[i].folder = slash ? p : "";
+			fk[i].album  = l->albums[out[i]].name;
+			fk[i].al     = out[i];
+		}
+		qsort(fk, (size_t)n, sizeof *fk, by_folder);
+		for (i = 0; i < n; i++) out[i] = fk[i].al;
+		free(fk);
+		return n;
+	}
 	return n;
 }

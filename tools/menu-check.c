@@ -888,17 +888,21 @@ static void ingame_rows(void)
 	menu_row rows[GM_ROWS];
 	int got[GM_ROWS], n, k;
 
-	u.dmode = "Native"; u.earned = 12; u.total = 40;
+	u.dmode = "Native"; u.dfilter = "Sharp"; u.controls = "MENU+R1: tua nhanh"; u.earned = 12; u.total = 40;
 	n = gm_rows(&u, rows, &b);
 
 	printf("in-game menu, a game with a set:\n");
-	ck(n == GM_ROWS, "seven rows");
+	ck(n == GM_ROWS, "nine rows");
 	ck(!strcmp(rows[GM_CONTINUE].label, "Continue"), "Continue leads");
 	ck(!strcmp(val(&rows[GM_DISPLAY]), "Native"), "Display carries the mode");
+	ck(!strcmp(val(&rows[GM_FILTER]), "Sharp"), "Filter carries the filter");
+	ck(!strcmp(val(&rows[GM_HELP]), "MENU+R1: tua nhanh"), "Controls shows the shortcuts");
+	ck(!rows[GM_HELP].live, "Controls is informational, not a stop");
 	ck(!strcmp(val(&rows[GM_CHEEVOS]), "12 / 40"), "Cheevos counts the set");
 	ck(rows[GM_CHEEVOS].live, "and is reachable");
 	k = reachable(rows, n, got, GM_ROWS);
-	ck(k == GM_ROWS, "every row is a stop");
+	ck(k == GM_ROWS - 1, "every live row is a stop");
+	ck(!holds(got, k, GM_HELP), "Controls is skipped by the cursor");
 
 	u.earned = 0; u.total = 0;
 	n = gm_rows(&u, rows, &b);
@@ -906,10 +910,11 @@ static void ingame_rows(void)
 	ck(!strcmp(val(&rows[GM_CHEEVOS]), "none"), "Cheevos says none");
 	ck(!rows[GM_CHEEVOS].live, "and does nothing");
 	k = reachable(rows, n, got, GM_ROWS);
-	ck(k == GM_ROWS - 1, "so the cursor steps over it");
-	ck(!holds(got, k, GM_CHEEVOS), "and never rests on it");
+	ck(k == GM_ROWS - 2, "Cheevos and Controls are both skipped");
+	ck(!holds(got, k, GM_CHEEVOS), "and never rests on Cheevos");
+	ck(!holds(got, k, GM_HELP), "or on Controls");
 	ck(holds(got, k, GM_QUIT) && holds(got, k, GM_CONTINUE),
-	   "the rows either side of it still work");
+	   "the rows either side of them still work");
 }
 
 /* The save slots, and the one constant that survived a rename by being written

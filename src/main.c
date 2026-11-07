@@ -7729,6 +7729,15 @@ static int slot_strip(app *a, SDL_Texture *bg, int saving)
 	return done == 1 ? chosen : 0;
 }
 
+/* Send SETDISPLAY with both mode and filter on one line, so Diatom applies
+ * them together rather than one overriding the other. */
+static void gm_send_display(app *a)
+{
+	sysview *v = owner_view(a);
+	plat_resident_line("SETDISPLAY\tmode=%s\tfilter=%s",
+	                   DMODES[v->dmode].name, DFILTERS[v->dfilter].name);
+}
+
 /* Change the mode, keep it, tell the running game, and take back the rect so
  * the backdrop behind the menu redraws where the game is about to be. */
 static void gm_cycle_display(app *a, int d)
@@ -7756,15 +7765,6 @@ static void gm_cycle_filter(app *a, int d)
 	display_save(a);
 	gm_send_display(a);
 	plat_resident_sync_rect(150);
-}
-
-/* Send SETDISPLAY with both mode and filter on one line, so Diatom applies
- * them together rather than one overriding the other. */
-static void gm_send_display(app *a)
-{
-	sysview *v = owner_view(a);
-	plat_resident_line("SETDISPLAY\tmode=%s\tfilter=%s",
-	                   DMODES[v->dmode].name, DFILTERS[v->dfilter].name);
 }
 
 /* What the in-game menu needs from the app, handed to gm_rows to become rows.

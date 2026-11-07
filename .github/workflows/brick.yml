@@ -41,6 +41,7 @@ env:
     libSDL2-2.0.so.0 libSDL2_image-2.0.so.0 libSDL2_ttf-2.0.so.0
     libavformat.so.60 libavcodec.so.60 libavfilter.so.9 libavutil.so.58
     libswresample.so.4 libdbus-1.so.3 libpthread.so.0 libdl.so.2
+    ld-linux-aarch64.so.1
   # Extra libretro cores this card's systems.cfg names, beyond upstream's.
   EXTRA_CORES: >-
     pcsx_rearmed picodrive prboom squirreljme
@@ -158,6 +159,8 @@ jobs:
           mkdir -p "$P/cards" "$P/cores"
           cp TortOS/build/tortos.elf TortOS/build/muse TortOS/build/btplayer "$P/"
           cp diatom/build/brick/diatom "$P/"
+          # Stripped, as the device's own binaries are
+          strip "$P/tortos.elf" "$P/muse" "$P/btplayer" "$P/diatom"
           cp TortOS/config/systems.cfg "$P/"
           cp -R TortOS/res/cards/. "$P/cards/"
           cp cores/*_libretro.so "$P/cores/"

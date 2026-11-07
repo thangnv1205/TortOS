@@ -92,7 +92,12 @@ jobs:
       - name: Diatom checks (make check)
         if: ${{ !inputs.skip_checks }}
         working-directory: diatom
-        run: make check
+        # check-proto and check-stateplane drive the DESKTOP build against the
+        # stub core, and only rebuild them if they already exist (FRESH_IF_BUILT)
+        run: |
+          make -j"$(nproc)"
+          make stub
+          SDL_AUDIODRIVER=dummy SDL_VIDEODRIVER=dummy make check
 
       - name: Build Diatom (PORT=brick)
         working-directory: diatom

@@ -110,6 +110,9 @@ jobs:
           # (box art from libretro only), see mk/cross.mk.
           SS_DEVID: ${{ secrets.SS_DEVID }}
           SS_DEVPASS: ${{ secrets.SS_DEVPASS }}
+          # Ubuntu keeps dbus' arch header under the multiarch libdir, where
+          # Buildroot's sysroot has it under usr/lib (mk/cross.mk's -I)
+          CPATH: /usr/lib/aarch64-linux-gnu/dbus-1.0/include
         run: |
           make -f mk/cross.mk DEVICE=brick CC=gcc SYSROOT=/ \
                VERSION="${{ steps.ver.outputs.version }}" \
